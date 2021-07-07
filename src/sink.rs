@@ -24,6 +24,7 @@ struct Controls {
     pause: AtomicBool,
     volume: Mutex<f32>,
     stopped: AtomicBool,
+    do_skip: AtomicBool,
 }
 
 impl Sink {
@@ -47,6 +48,7 @@ impl Sink {
                 pause: AtomicBool::new(false),
                 volume: Mutex::new(1.0),
                 stopped: AtomicBool::new(false),
+                do_skip: AtomicBool::new(false),
             }),
             sound_count: Arc::new(AtomicUsize::new(0)),
             detached: false,
@@ -67,16 +69,22 @@ impl Sink {
         let source = source
             .pausable(false)
             .amplify(1.0)
+            .skippable()
             .stoppable()
             .periodic_access(Duration::from_millis(5), move |src| {
+                
                 if controls.stopped.load(Ordering::SeqCst) {
                     src.stop();
-                } else {
-                    src.inner_mut().set_factor(*controls.volume.lock().unwrap());
-                    src.inner_mut()
-                        .inner_mut()
-                        .set_paused(controls.pause.load(Ordering::SeqCst));
                 }
+                if controls.do_skip.load(Ordering::SeqCst) {
+                    src.inner_mut().skip();
+                    controls.do_skip.store(false, Ordering::SeqCst);
+                }
+                let amp = src.inner_mut().inner_mut();
+                amp.set_factor(*controls.volume.lock().unwrap());
+                amp.inner_mut()
+                   .set_paused(controls.pause.load(Ordering::SeqCst));
+                
             })
             .convert_samples();
         self.sound_count.fetch_add(1, Ordering::Relaxed);
@@ -125,6 +133,25 @@ impl Sink {
     /// sink is paused.
     pub fn is_paused(&self) -> bool {
         self.controls.pause.load(Ordering::SeqCst)
+    }
+
+
+    /// Removes all currently loaded `Source`s from the `Sink`, and pauses it.
+    ///
+    /// See `pause()` for information about pausing a `Sink`.
+    pub fn clear(&self) {
+        let len = self.queue_tx.clear();
+        self.sound_count.fetch_sub(len, Ordering::SeqCst);
+        self.pause();
+    }
+    
+    /// Skips to the next `Source` in the `Sink`
+    ///
+    /// If there are more `Source`s appended to the `Sink` at the time, 
+    /// it will play the next one. Otherwise, the `Sink` will finish as if
+    /// it had finished playing a `Source` all the way through.
+    pub fn skip_one(&self) {
+        self.controls.do_skip.store(true, Ordering::SeqCst);
     }
 
     /// Stops the sink by emptying the queue.
